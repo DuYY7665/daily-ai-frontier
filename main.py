@@ -9,6 +9,7 @@ import os
 import re
 import requests
 from datetime import datetime, timezone, timedelta
+from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
 # ── Supabase 连接 ──────────────────────────────────────
@@ -31,34 +32,13 @@ PRIORITY_MAP = {
     "行业生态与政策": 2,
 }
 
-# ── 资讯源配置 ────────────────────────────────────────
-SOURCES = [
-    {
-        "name": "DeepLearning.AI - The Batch",
-        "url": "https://www.deeplearning.ai/the-batch/",
-        "platform": "DeepLearning.AI",
-    },
-    {
-        "name": "NVIDIA Developer Blog",
-        "url": "https://developer.nvidia.com/blog/",
-        "platform": "NVIDIA Developer Blog",
-    },
-    {
-        "name": "Hugging Face Blog",
-        "url": "https://huggingface.co/blog",
-        "platform": "Hugging Face",
-    },
-    {
-        "name": "OpenAI Blog",
-        "url": "https://openai.com/blog",
-        "platform": "OpenAI",
-    },
-    {
-        "name": "Anthropic News",
-        "url": "https://www.anthropic.com/news",
-        "platform": "Anthropic",
-    },
-]
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    )
+}
 
 
 def get_today_str() -> str:
@@ -67,73 +47,221 @@ def get_today_str() -> str:
     return datetime.now(bj).strftime("%Y-%m-%d")
 
 
-def fetch_news_from_sources() -> list[dict]:
-    """从配置的资讯源抓取新闻（示例实现）
+# ── 爬虫：抓取各资讯源 ────────────────────────────────
 
-    实际使用时可替换为真正的爬虫逻辑（requests + BeautifulSoup / Selenium / RSS 解析等）。
-    此处提供框架和示例数据，展示完整数据流。
-    """
-    today = get_today_str()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
+def crawl_deeplearning_ai() -> list[dict]:
+    """抓取 DeepLearning.AI The Batch 最新文章"""
+    items = []
+    try:
+        print("  [FETCH] DeepLearning.AI - The Batch ...")
+        resp = requests.get("https://www.deeplearning.ai/the-batch/", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        articles = soup.select("a[href*='/the-batch/']")
+        seen_urls = set()
+        for a in articles[:10]:
+            href = a.get("href", "")
+            if not href or href == "/the-batch/" or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://www.deeplearning.ai" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "DeepLearning.AI",
+                "category": "方法论与研究",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] DeepLearning.AI: {e}")
+    return items
+
+
+def crawl_nvidia_blog() -> list[dict]:
+    """抓取 NVIDIA Developer Blog AI 相关文章"""
+    items = []
+    try:
+        print("  [FETCH] NVIDIA Developer Blog ...")
+        resp = requests.get(
+            "https://developer.nvidia.com/blog/category/ai/",
+            headers=HEADERS, timeout=15
         )
-    }
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
 
-    collected = []
+        posts = soup.select("article h2 a, .post-title a, h3.entry-title a")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://developer.nvidia.com" + href
+            seen_urls.add(href)
 
-    for source in SOURCES:
-        try:
-            print(f"  [FETCH] {source['name']} ...")
-            resp = requests.get(source["url"], headers=headers, timeout=15)
-            resp.raise_for_status()
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
 
-            # TODO: 根据实际网站结构解析页面内容
-            # 下面是数据模板，实际爬虫替换此处逻辑
-            # from bs4 import BeautifulSoup
-            # soup = BeautifulSoup(resp.text, 'html.parser')
-            # ... 解析逻辑 ...
+            category = "模型技术"
+            if "agent" in title.lower():
+                category = "Agent智能体"
+            elif "tool" in title.lower() or "deploy" in title.lower():
+                category = "应用落地与工具"
 
-            print(f"    [OK] 成功访问 {source['name']} ({len(resp.text)} bytes)")
+            items.append({
+                "date": get_today_str(),
+                "platform": "NVIDIA Developer Blog",
+                "category": category,
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
 
-        except Exception as e:
-            print(f"    [ERR] {source['name']}: {e}")
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] NVIDIA: {e}")
+    return items
 
-    # ── 示例数据（展示完整数据结构，实际部署后替换为真实解析结果）──
-    sample_news = [
-        {
-            "date": today,
-            "platform": "NVIDIA Developer Blog",
-            "category": "Agent智能体",
-            "summary": "NVIDIA Dynamo 发布多轮 Agent 推理与工具调用支持",
-            "cn_text": "NVIDIA 发布 Dynamo 推理框架的重大更新，新增多轮 Agent 推理与工具调用的完整支持。",
-            "url": "https://developer.nvidia.com/blog/streaming-tokens-and-tools-multi-turn-agentic-harness-support-in-nvidia-dynamo/",
-            "en_text": "NVIDIA announced multi-turn agentic harness support in Dynamo.",
-        },
-        {
-            "date": today,
-            "platform": "DeepLearning.AI",
-            "category": "Agent智能体",
-            "summary": "DeepLearning.AI 联合 CopilotKit 发布免费课程「构建交互式 Agent 与生成式 UI」",
-            "cn_text": "DeepLearning.AI 与 CopilotKit 联合发布全新免费课程「Build Interactive Agents with Generative UI」。",
-            "url": "https://www.deeplearning.ai/short-courses/build-interactive-agents-with-generative-ui/",
-            "en_text": "DeepLearning.AI and CopilotKit released a free course on building interactive agents with generative UI.",
-        },
-        {
-            "date": today,
-            "platform": "Anthropic Academy",
-            "category": "Agent智能体",
-            "summary": "Anthropic Academy 新增 Agent Skills 和 Subagents 课程",
-            "cn_text": "Anthropic Academy 持续扩展其课程体系，新增 Agent Skills 和 Subagents 两大 Claude Code 课程。",
-            "url": "https://anthropic.skilljar.com",
-            "en_text": "Anthropic Academy expanded to 17 courses covering the full Claude ecosystem.",
-        },
-    ]
 
-    collected.extend(sample_news)
-    return collected
+def crawl_huggingface() -> list[dict]:
+    """抓取 Hugging Face Blog"""
+    items = []
+    try:
+        print("  [FETCH] Hugging Face Blog ...")
+        resp = requests.get("https://huggingface.co/blog", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("article a[href*='/blog/'], a.block[href*='/blog/']")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href == "/blog" or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://huggingface.co" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "Hugging Face",
+                "category": "模型技术",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] Hugging Face: {e}")
+    return items
+
+
+def crawl_openai() -> list[dict]:
+    """抓取 OpenAI Blog"""
+    items = []
+    try:
+        print("  [FETCH] OpenAI Blog ...")
+        resp = requests.get("https://openai.com/blog", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("a[href*='/index/']") or soup.select("a[href*='/blog/']")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href == "/blog" or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://openai.com" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "OpenAI",
+                "category": "模型技术",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] OpenAI: {e}")
+    return items
+
+
+def crawl_anthropic() -> list[dict]:
+    """抓取 Anthropic News"""
+    items = []
+    try:
+        print("  [FETCH] Anthropic News ...")
+        resp = requests.get("https://www.anthropic.com/news", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("a[href*='/news/']")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href == "/news" or href == "/news/" or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://www.anthropic.com" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "Anthropic",
+                "category": "Agent智能体",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] Anthropic: {e}")
+    return items
+
+
+def fetch_all_news() -> list[dict]:
+    """汇总所有资讯源"""
+    all_items = []
+    all_items.extend(crawl_deeplearning_ai())
+    all_items.extend(crawl_nvidia_blog())
+    all_items.extend(crawl_huggingface())
+    all_items.extend(crawl_openai())
+    all_items.extend(crawl_anthropic())
+    return all_items
 
 
 def clean_item(item: dict) -> dict:
@@ -152,14 +280,7 @@ def clean_item(item: dict) -> dict:
 
 
 def upsert_to_supabase(items: list[dict]) -> int:
-    """将清洗后的数据 upsert 到 Supabase ai_news 表
-
-    使用 original_url 字段（即 url）作为唯一键进行去重。
-    如果 url 已存在则更新，不存在则插入。
-
-    Returns:
-        int: 成功处理的条数
-    """
+    """将清洗后的数据 upsert 到 Supabase ai_news 表"""
     if not items:
         print("  [WARN] 没有数据需要写入")
         return 0
@@ -168,7 +289,6 @@ def upsert_to_supabase(items: list[dict]) -> int:
 
     for item in items:
         if not item.get("url"):
-            print("  [SKIP] 缺少 URL，跳过")
             continue
 
         try:
@@ -180,7 +300,7 @@ def upsert_to_supabase(items: list[dict]) -> int:
             if result.data:
                 success_count += 1
         except Exception as e:
-            print(f"  [ERR] 写入失败 ({item.get('url', 'N/A')}): {e}")
+            print(f"  [ERR] 写入失败 ({item.get('url', 'N/A')[:50]}): {e}")
 
     return success_count
 
@@ -196,7 +316,7 @@ def main():
 
     # 1. 抓取资讯
     print("[1/3] 正在抓取资讯...")
-    raw_items = fetch_news_from_sources()
+    raw_items = fetch_all_news()
     print(f"  共获取 {len(raw_items)} 条原始数据\n")
 
     # 2. 数据清洗
