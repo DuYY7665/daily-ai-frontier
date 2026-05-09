@@ -1,0 +1,30 @@
+# 环境变量（绝对不能泄露密钥）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# 旧本地数据文件
+*.db
+*.sqlite3
+*.xlsx
+*.json
+!package.json
+!package-lock.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WorkBuddy
+.workbuddy/
