@@ -351,18 +351,20 @@
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 15l-6-6-6 6"/></svg>
 </button>
 
-<!-- ═══ Supabase JS SDK via CDN ═══ -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-
 <!-- ═══ JS ═══ -->
 <script>
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
 
-/* ── Supabase 初始化 ── */
-const SUPABASE_URL = 'https://cgrjrzogttcdijaibyls.supabase.co';
-const SUPABASE_KEY = 'sb_publishable__4gpm5VC3I6sVPL0ifAUSA_RWFsdNIk';
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+/* ── Supabase REST API 配置 ── */
+const API_BASE = 'https://cgrjrzogttcdijaibyls.supabase.co/rest/v1';
+const API_KEY = 'sb_publishable__4gpm5VC3I6sVPL0ifAUSA_RWFsdNIk';
+const HEADERS = {
+  'apikey': API_KEY,
+  'Authorization': `Bearer ${API_KEY}`,
+  'Content-Type': 'application/json',
+  'Prefer': 'return=representation'
+};
 
 /* ── State ── */
 const S = {
@@ -374,99 +376,89 @@ const S = {
   counts: { p0: 0, p1: 0, p2: 0, total: 0 }
 };
 
-/* ── 从 Supabase 拉取资讯 ── */
+/* ── 从 Supabase REST API 拉取资讯 ── */
 async function fetchNews() {
-  let query = supabase
-    .from('ai_news')
-    .select('*', { count: 'exact' });
+  let params = new URLSearchParams();
+  params.set('select', '*');
+  params.set('order', 'priority.asc,date.desc,id.desc');
+  params.set('limit', '200');
 
-  if (S.f.p !== '') {
-    query = query.eq('priority', parseInt(S.f.p));
-  }
-  if (S.f.cat) {
-    query = query.eq('category', S.f.cat);
-  }
-  if (S.f.plat) {
-    query = query.eq('platform', S.f.plat);
-  }
-  if (S.f.date) {
-    query = query.eq('date', S.f.date);
-  }
+  let filters = [];
+  if (S.f.p !== '') filters.push(`priority=eq.${S.f.p}`);
+  if (S.f.cat) filters.push(`category=eq.${S.f.cat}`);
+  if (S.f.plat) filters.push(`platform=eq.${S.f.plat}`);
+  if (S.f.date) filters.push(`date=eq.${S.f.date}`);
   if (S.f.q) {
-    query = query.or(
-      `summary.ilike.%${S.f.q}%,cn_text.ilike.%${S.f.q}%,platform.ilike.%${S.f.q}%`
-    );
+    const q = encodeURIComponent(`%${S.f.q}%`);
+    filters.push(`or=(summary.ilike.${q},cn_text.ilike.${q},platform.ilike.${q})`);
   }
 
-  query = query.order('priority', { ascending: true })
-               .order('date', { ascending: false })
-               .order('id', { ascending: false })
-               .limit(200);
+  const filterStr = filters.length ? '&' + filters.join('&') : '';
+  const url = `${API_BASE}/ai_news?${params}${filterStr}`;
 
-  const { data, error, count } = await query;
-
-  if (error) {
-    console.error('Supabase query error:', error);
+  try {
+    const resp = await fetch(url, {
+      headers: { ...HEADERS, 'Prefer': 'count=exact' }
+    });
+    const data = await resp.json();
+    const total = parseInt(resp.headers.get('content-range')?.split('/')[1] || data.length);
+    return { data: data || [], total };
+  } catch(e) {
+    console.error('API error:', e);
     return null;
   }
-
-  return { data: data || [], total: count || 0 };
 }
 
 /* ── 获取筛选选项和统计 ── */
 async function fetchFiltersAndCounts() {
-  const [catRes, platRes, dateRes, p0Res, p1Res, p2Res] = await Promise.all([
-    supabase.from('ai_news').select('category').order('category'),
-    supabase.from('ai_news').select('platform').order('platform'),
-    supabase.from('ai_news').select('date').order('date', { ascending: false }),
-    supabase.from('ai_news').select('*', { count: 'exact', head: true }).eq('priority', 0),
-    supabase.from('ai_news').select('*', { count: 'exact', head: true }).eq('priority', 1),
-    supabase.from('ai_news').select('*', { count: 'exact', head: true }).eq('priority', 2),
-  ]);
+  try {
+    const [allRes, p0Res, p1Res, p2Res] = await Promise.all([
+      fetch(`${API_BASE}/ai_news?select=category,platform,date`, { headers: HEADERS }).then(r => r.json()),
+      fetch(`${API_BASE}/ai_news?select=id&priority=eq.0`, { headers: { ...HEADERS, 'Prefer': 'count=exact' } }),
+      fetch(`${API_BASE}/ai_news?select=id&priority=eq.1`, { headers: { ...HEADERS, 'Prefer': 'count=exact' } }),
+      fetch(`${API_BASE}/ai_news?select=id&priority=eq.2`, { headers: { ...HEADERS, 'Prefer': 'count=exact' } }),
+    ]);
 
-  const unique = (arr, key) => [...new Set((arr || []).map(r => r[key]).filter(Boolean))];
+    const unique = (arr, key) => [...new Set(arr.map(r => r[key]).filter(Boolean))].sort();
+    S.filters.categories = unique(allRes, 'category');
+    S.filters.platforms = unique(allRes, 'platform');
+    S.filters.dates = [...new Set(allRes.map(r => r.date).filter(Boolean))].sort().reverse();
 
-  S.filters.categories = unique(catRes.data, 'category');
-  S.filters.platforms = unique(platRes.data, 'platform');
-  S.filters.dates = unique(dateRes.data, 'date');
-  S.counts = {
-    p0: p0Res.count || 0,
-    p1: p1Res.count || 0,
-    p2: p2Res.count || 0,
-    total: (p0Res.count || 0) + (p1Res.count || 0) + (p2Res.count || 0)
-  };
+    const getCount = (resp) => parseInt(resp.headers.get('content-range')?.split('/')[1] || '0');
+    S.counts = {
+      p0: getCount(p0Res),
+      p1: getCount(p1Res),
+      p2: getCount(p2Res),
+      total: getCount(p0Res) + getCount(p1Res) + getCount(p2Res)
+    };
+  } catch(e) {
+    console.error('Filter fetch error:', e);
+  }
 }
 
 /* ── 点赞 ── */
 async function doLike(id, btn) {
-  const { data: current, error: fetchErr } = await supabase
-    .from('ai_news')
-    .select('likes')
-    .eq('id', id)
-    .single();
+  try {
+    const getResp = await fetch(`${API_BASE}/ai_news?select=likes&id=eq.${id}`, { headers: HEADERS });
+    const rows = await getResp.json();
+    if (!rows.length) return;
 
-  if (fetchErr) {
-    console.error('获取点赞数失败:', fetchErr);
-    return;
+    const newLikes = (rows[0].likes || 0) + 1;
+
+    await fetch(`${API_BASE}/ai_news?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: HEADERS,
+      body: JSON.stringify({ likes: newLikes })
+    });
+
+    S.liked.add(id);
+    btn.querySelector('span').textContent = newLikes;
+    const svg = btn.querySelector('svg');
+    svg.setAttribute('fill', 'currentColor');
+    btn.classList.add('liked');
+  } catch(e) {
+    console.error('Like error:', e);
   }
-
-  const newLikes = (current.likes || 0) + 1;
-
-  const { error: updateErr } = await supabase
-    .from('ai_news')
-    .update({ likes: newLikes })
-    .eq('id', id);
-
-  if (updateErr) {
-    console.error('更新点赞失败:', updateErr);
-    return;
-  }
-
-  S.liked.add(id);
-  btn.querySelector('span').textContent = newLikes;
-  const svg = btn.querySelector('svg');
-  svg.setAttribute('fill', 'currentColor');
-  btn.classList.add('liked');
 }
 
 /* ── Render ── */
