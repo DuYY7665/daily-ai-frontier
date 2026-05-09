@@ -253,14 +253,219 @@ def crawl_anthropic() -> list[dict]:
     return items
 
 
+def crawl_openai_academy() -> list[dict]:
+    """抓取 OpenAI Academy 活动和课程"""
+    items = []
+    try:
+        print("  [FETCH] OpenAI Academy ...")
+        resp = requests.get("https://academy.openai.com", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("a[href*='/events/'], a[href*='/courses/'], a[href*='/catalog/']")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://academy.openai.com" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "OpenAI Academy",
+                "category": "Agent智能体",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] OpenAI Academy: {e}")
+    return items
+
+
+def crawl_google_ai() -> list[dict]:
+    """抓取 Google Grow with Google AI 内容"""
+    items = []
+    try:
+        print("  [FETCH] Google Grow with Google AI ...")
+        resp = requests.get("https://grow.google/ai/", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("a[href*='grow.google'], a[href*='/courses/'], a[href*='/ai']")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href in seen_urls or len(href) < 10:
+                continue
+            if not href.startswith("http"):
+                href = "https://grow.google" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "Google Grow with Google",
+                "category": "模型技术",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] Google AI: {e}")
+    return items
+
+
+def crawl_ibm_skillsbuild() -> list[dict]:
+    """抓取 IBM SkillsBuild 活动和课程"""
+    items = []
+    try:
+        print("  [FETCH] IBM SkillsBuild ...")
+        resp = requests.get("https://skillsbuild.org/events", headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("a[href*='/events/'], a[href*='/courses/'], a[href*='skillsbuild']")
+        seen_urls = set()
+        for a in posts[:8]:
+            href = a.get("href", "")
+            if not href or href in seen_urls or len(href) < 10:
+                continue
+            if not href.startswith("http"):
+                href = "https://skillsbuild.org" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "IBM SkillsBuild",
+                "category": "行业生态与政策",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] IBM SkillsBuild: {e}")
+    return items
+
+
+def crawl_nvidia_cuda() -> list[dict]:
+    """抓取 NVIDIA CUDA/开发者工具更新"""
+    items = []
+    try:
+        print("  [FETCH] NVIDIA Developer (CUDA & Tools) ...")
+        resp = requests.get(
+            "https://developer.nvidia.com/blog/category/developer-tools/",
+            headers=HEADERS, timeout=15
+        )
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("article h2 a, .post-title a, h3.entry-title a")
+        seen_urls = set()
+        for a in posts[:5]:
+            href = a.get("href", "")
+            if not href or href in seen_urls:
+                continue
+            if not href.startswith("http"):
+                href = "https://developer.nvidia.com" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "NVIDIA Developer",
+                "category": "应用落地与工具",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [ERR] NVIDIA CUDA: {e}")
+    return items
+
+
+def crawl_meta_ai() -> list[dict]:
+    """抓取 Meta AI Resources（可能报错，容错处理）"""
+    items = []
+    try:
+        print("  [FETCH] Meta AI ...")
+        resp = requests.get("https://ai.meta.com/resources/", headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        posts = soup.select("a[href*='/resources/'], a[href*='/blog/'], a[href*='/research/']")
+        seen_urls = set()
+        for a in posts[:5]:
+            href = a.get("href", "")
+            if not href or href in seen_urls or len(href) < 10:
+                continue
+            if not href.startswith("http"):
+                href = "https://ai.meta.com" + href
+            seen_urls.add(href)
+
+            title = a.get_text(strip=True)
+            if not title or len(title) < 10:
+                continue
+
+            items.append({
+                "date": get_today_str(),
+                "platform": "Meta AI",
+                "category": "模型技术",
+                "summary": title[:200],
+                "cn_text": title,
+                "url": href,
+                "en_text": title,
+            })
+
+        print(f"    [OK] 获取 {len(items)} 条")
+    except Exception as e:
+        print(f"    [SKIP] Meta AI（页面不可用，已跳过）: {e}")
+    return items
+
+
 def fetch_all_news() -> list[dict]:
-    """汇总所有资讯源"""
+    """汇总所有 10 个资讯源（含 3 个容错源）"""
     all_items = []
+    # 7 个稳定源
     all_items.extend(crawl_deeplearning_ai())
     all_items.extend(crawl_nvidia_blog())
+    all_items.extend(crawl_nvidia_cuda())
     all_items.extend(crawl_huggingface())
     all_items.extend(crawl_openai())
+    all_items.extend(crawl_openai_academy())
     all_items.extend(crawl_anthropic())
+    all_items.extend(crawl_google_ai())
+    all_items.extend(crawl_ibm_skillsbuild())
+    # 容错源（可能失败，不影响整体）
+    all_items.extend(crawl_meta_ai())
     return all_items
 
 
