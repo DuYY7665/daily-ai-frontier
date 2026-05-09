@@ -41,10 +41,10 @@ HEADERS = {
 }
 
 
-def get_today_str() -> str:
-    """获取北京时间今天的日期字符串"""
+def get_now_iso() -> str:
+    """获取北京时间当前时刻的 ISO 8601 时间戳（精确到秒）"""
     bj = timezone(timedelta(hours=8))
-    return datetime.now(bj).strftime("%Y-%m-%d")
+    return datetime.now(bj).strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
 # ── 爬虫：抓取各资讯源 ────────────────────────────────
@@ -73,7 +73,7 @@ def crawl_deeplearning_ai() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "DeepLearning.AI",
                 "category": "方法论与研究",
                 "summary": title[:200],
@@ -121,7 +121,7 @@ def crawl_nvidia_blog() -> list[dict]:
                 category = "应用落地与工具"
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "NVIDIA Developer Blog",
                 "category": category,
                 "summary": title[:200],
@@ -160,7 +160,7 @@ def crawl_huggingface() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "Hugging Face",
                 "category": "模型技术",
                 "summary": title[:200],
@@ -199,7 +199,7 @@ def crawl_openai() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "OpenAI",
                 "category": "模型技术",
                 "summary": title[:200],
@@ -238,7 +238,7 @@ def crawl_anthropic() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "Anthropic",
                 "category": "Agent智能体",
                 "summary": title[:200],
@@ -277,7 +277,7 @@ def crawl_openai_academy() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "OpenAI Academy",
                 "category": "Agent智能体",
                 "summary": title[:200],
@@ -316,7 +316,7 @@ def crawl_google_ai() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "Google Grow with Google",
                 "category": "模型技术",
                 "summary": title[:200],
@@ -355,7 +355,7 @@ def crawl_ibm_skillsbuild() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "IBM SkillsBuild",
                 "category": "行业生态与政策",
                 "summary": title[:200],
@@ -397,7 +397,7 @@ def crawl_nvidia_cuda() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "NVIDIA Developer",
                 "category": "应用落地与工具",
                 "summary": title[:200],
@@ -436,7 +436,7 @@ def crawl_meta_ai() -> list[dict]:
                 continue
 
             items.append({
-                "date": get_today_str(),
+                "date": get_now_iso(),
                 "platform": "Meta AI",
                 "category": "模型技术",
                 "summary": title[:200],
@@ -517,7 +517,7 @@ def clean_item(item: dict) -> dict | None:
         return None
 
     return {
-        "date": (item.get("date") or get_today_str()).strip(),
+        "date": (item.get("date") or get_now_iso()).strip(),
         "platform": (item.get("platform") or "Unknown").strip(),
         "category": (item.get("category") or "行业生态与政策").strip(),
         "priority": PRIORITY_MAP.get(item.get("category", ""), 2),

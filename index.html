@@ -387,7 +387,10 @@ async function fetchNews() {
   if (S.f.p !== '') filters.push(`priority=eq.${S.f.p}`);
   if (S.f.cat) filters.push(`category=eq.${S.f.cat}`);
   if (S.f.plat) filters.push(`platform=eq.${S.f.plat}`);
-  if (S.f.date) filters.push(`date=eq.${S.f.date}`);
+  if (S.f.date) {
+    filters.push(`date=gte.${S.f.date}T00:00:00`);
+    filters.push(`date=lt.${S.f.date}T23:59:59`);
+  }
   if (S.f.q) {
     const q = encodeURIComponent(`%${S.f.q}%`);
     filters.push(`or=(summary.ilike.${q},cn_text.ilike.${q},platform.ilike.${q})`);
@@ -422,7 +425,7 @@ async function fetchFiltersAndCounts() {
     const unique = (arr, key) => [...new Set(arr.map(r => r[key]).filter(Boolean))].sort();
     S.filters.categories = unique(allRes, 'category');
     S.filters.platforms = unique(allRes, 'platform');
-    S.filters.dates = [...new Set(allRes.map(r => r.date).filter(Boolean))].sort().reverse();
+    S.filters.dates = [...new Set(allRes.map(r => fmtDate(r.date)).filter(Boolean))].sort().reverse();
 
     const getCount = (resp) => parseInt(resp.headers.get('content-range')?.split('/')[1] || '0');
     S.counts = {
@@ -461,6 +464,21 @@ async function doLike(id, btn) {
   }
 }
 
+/* ── 时间格式化 ── */
+function fmtTime(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function fmtDate(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+
 /* ── Render ── */
 function esc(s) {
   if (!s) return '';
@@ -491,7 +509,7 @@ function render(result) {
         <span class="badge badge-${it.priority}">P${it.priority}</span>
         <span class="cat cat-${esc(it.category)}">${esc(it.category)}</span>
         <span class="plat">${esc(it.platform)}</span>
-        <span class="c-date">${esc(it.date)}</span>
+        <span class="c-date">${fmtTime(it.date)}</span>
       </div>
       <div class="c-body">
         <p class="summary">${esc(it.summary)}</p>
