@@ -469,17 +469,62 @@ def fetch_all_news() -> list[dict]:
     return all_items
 
 
-def clean_item(item: dict) -> dict:
-    """清洗单条资讯数据"""
+NOISE_KEYWORDS = [
+    "learn more", "sign up", "register", "subscribe", "cookie",
+    "privacy", "terms of", "log in", "menu", "navigation",
+    "skip to content", "search", "footer", "header",
+]
+
+
+def is_noise(text: str) -> bool:
+    """判断是否为噪音内容（导航、按钮文字等）"""
+    t = text.lower().strip()
+    if len(t) < 20:
+        return True
+    for kw in NOISE_KEYWORDS:
+        if t == kw or t.startswith(kw):
+            return True
+    return False
+
+
+def has_chinese(text: str) -> bool:
+    """判断文本是否包含中文"""
+    return any('\u4e00' <= c <= '\u9fff' for c in text)
+
+
+def clean_item(item: dict) -> dict | None:
+    """清洗单条资讯数据，不合格返回 None"""
+    summary = (item.get("summary") or "").strip()
+    cn_text = (item.get("cn_text") or "").strip()
+    url = (item.get("url") or "").strip()
+    en_text = (item.get("en_text") or "").strip()
+
+    if not url:
+        return None
+
+    # 过滤噪音内容
+    if is_noise(summary):
+        return None
+
+    # summary 必须有实质长度（至少30字符）
+    if len(summary) < 30:
+        return None
+
+    # cn_text 必须有实质内容且与 summary 不同（证明有翻译/编辑）
+    if len(cn_text) < 50:
+        return None
+    if cn_text == summary and not has_chinese(cn_text):
+        return None
+
     return {
         "date": (item.get("date") or get_today_str()).strip(),
         "platform": (item.get("platform") or "Unknown").strip(),
         "category": (item.get("category") or "行业生态与政策").strip(),
         "priority": PRIORITY_MAP.get(item.get("category", ""), 2),
-        "summary": (item.get("summary") or "").strip(),
-        "cn_text": (item.get("cn_text") or "").strip(),
-        "url": (item.get("url") or "").strip(),
-        "en_text": (item.get("en_text") or "").strip(),
+        "summary": summary,
+        "cn_text": cn_text,
+        "url": url,
+        "en_text": en_text,
         "likes": 0,
     }
 
@@ -493,9 +538,6 @@ def upsert_to_supabase(items: list[dict]) -> int:
     success_count = 0
 
     for item in items:
-        if not item.get("url"):
-            continue
-
         try:
             result = (
                 supabase.table("ai_news")
@@ -524,10 +566,10 @@ def main():
     raw_items = fetch_all_news()
     print(f"  共获取 {len(raw_items)} 条原始数据\n")
 
-    # 2. 数据清洗
+    # 2. 数据清洗（严格质量过滤）
     print("[2/3] 正在清洗数据...")
-    cleaned = [clean_item(item) for item in raw_items if item.get("url")]
-    print(f"  清洗后有效数据 {len(cleaned)} 条\n")
+    cleaned = [r for r in (clean_item(item) for item in raw_items) if r is not None]
+    print(f"  清洗后有效数据 {len(cleaned)} 条（过滤了 {len(raw_items) - len(cleaned)} 条低质量内容）\n")
 
     # 3. 写入 Supabase
     print("[3/3] 正在写入 Supabase...")
