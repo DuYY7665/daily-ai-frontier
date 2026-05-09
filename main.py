@@ -42,9 +42,9 @@ HEADERS = {
 
 
 def get_now_iso() -> str:
-    """获取北京时间当前时刻的 ISO 8601 时间戳（精确到秒）"""
+    """获取北京时间当前时刻的 ISO 8601 时间戳（精确到分钟）"""
     bj = timezone(timedelta(hours=8))
-    return datetime.now(bj).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    return datetime.now(bj).strftime("%Y-%m-%dT%H:%M:00+08:00")
 
 
 # ── 爬虫：抓取各资讯源 ────────────────────────────────
