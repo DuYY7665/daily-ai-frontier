@@ -292,7 +292,7 @@ def crawl_list_page(
 
 
 def fetch_all_links() -> list[dict]:
-    """从10个资讯源获取文章链接列表"""
+    """从11个资讯源获取文章链接列表"""
     all_links = []
 
     all_links.extend(crawl_list_page(
@@ -343,6 +343,12 @@ def fetch_all_links() -> list[dict]:
         "IBM SkillsBuild", "https://skillsbuild.org/events",
         "a[href*='/events/'], a[href*='/courses/'], a[href*='skillsbuild']",
         "https://skillsbuild.org",
+    ))
+    all_links.extend(crawl_list_page(
+        "SemiAnalysis", "https://newsletter.semianalysis.com/archive",
+        "a[href*='/p/']",
+        "https://newsletter.semianalysis.com",
+        max_items=5,
     ))
     try:
         all_links.extend(crawl_list_page(
