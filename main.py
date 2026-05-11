@@ -1,35 +1,65 @@
 # -*- coding: utf-8 -*-
 """每日AI前沿 - 云原生爬虫主程序（Supabase 版）
 
-从多个 AI 资讯源抓取最新资讯，清洗后写入 Supabase（PostgreSQL）。
-通过 GitHub Actions 每日定时触发。
+从多个 AI 资讯源抓取最新资讯，抓取正文并翻译为中文，
+清洗后写入 Supabase（PostgreSQL）。通过 GitHub Actions 每日定时触发。
+全程免费，无需付费 API。
 """
 
 import os
 import re
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
-# ── Supabase 连接 ──────────────────────────────────────
+# ── 环境变量 ──────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "缺少环境变量 SUPABASE_URL 或 SUPABASE_KEY，请在 .env 或 GitHub Secrets 中配置"
-    )
+    raise RuntimeError("缺少 SUPABASE_URL 或 SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ── 分类 → 优先级映射 ─────────────────────────────────
+# ── 常量 ──────────────────────────────────────────────
 PRIORITY_MAP = {
     "应用落地与工具": 0,
     "Agent智能体": 0,
     "模型技术": 1,
     "方法论与研究": 1,
     "行业生态与政策": 2,
+}
+
+CATEGORY_KEYWORDS = {
+    "Agent智能体": [
+        "agent", "agentic", "copilot", "autonomous", "multi-agent",
+        "tool use", "function call", "orchestrat", "workflow automat",
+    ],
+    "应用落地与工具": [
+        "deploy", "production", "sdk", "api", "plugin", "integration",
+        "tool", "platform", "release", "launch", "available", "ship",
+        "developer", "build", "framework", "library", "open source",
+        "cuda", "tensorrt", "triton", "vllm", "nim", "container",
+    ],
+    "模型技术": [
+        "model", "gpt", "claude", "llama", "gemini", "mistral",
+        "transformer", "attention", "training", "fine-tun", "pretrain",
+        "benchmark", "parameter", "token", "inference", "quantiz",
+        "vision", "multimodal", "speech", "audio", "video generat",
+    ],
+    "方法论与研究": [
+        "research", "paper", "study", "finding", "method", "approach",
+        "algorithm", "dataset", "evaluat", "survey", "analysis",
+        "scaling law", "rlhf", "reinforcement", "alignment",
+    ],
+    "行业生态与政策": [
+        "policy", "regulat", "govern", "partner", "acqui", "invest",
+        "funding", "market", "industry", "enterprise", "business",
+        "safety", "ethics", "bias", "copyright", "climate", "energy",
+        "hiring", "layoff", "workforce", "ads", "revenue",
+    ],
 }
 
 HEADERS = {
@@ -40,446 +70,73 @@ HEADERS = {
     )
 }
 
+NOISE_KEYWORDS = [
+    "learn more", "sign up", "register", "subscribe", "cookie",
+    "privacy", "terms of", "log in", "menu", "navigation",
+    "skip to content", "search", "footer", "header", "contact us",
+]
+
 
 def get_now_iso() -> str:
-    """获取北京时间当前时刻的 ISO 8601 时间戳（精确到分钟）"""
     bj = timezone(timedelta(hours=8))
     return datetime.now(bj).strftime("%Y-%m-%dT%H:%M:00+08:00")
 
 
-# ── 爬虫：抓取各资讯源 ────────────────────────────────
+# ── 通用工具 ──────────────────────────────────────────
 
-def crawl_deeplearning_ai() -> list[dict]:
-    """抓取 DeepLearning.AI The Batch 最新文章"""
-    items = []
+def fetch_page(url: str, timeout: int = 15) -> BeautifulSoup | None:
     try:
-        print("  [FETCH] DeepLearning.AI - The Batch ...")
-        resp = requests.get("https://www.deeplearning.ai/the-batch/", headers=HEADERS, timeout=15)
+        resp = requests.get(url, headers=HEADERS, timeout=timeout)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        articles = soup.select("a[href*='/the-batch/']")
-        seen_urls = set()
-        for a in articles[:10]:
-            href = a.get("href", "")
-            if not href or href == "/the-batch/" or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://www.deeplearning.ai" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "DeepLearning.AI",
-                "category": "方法论与研究",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
+        return BeautifulSoup(resp.text, "lxml")
     except Exception as e:
-        print(f"    [ERR] DeepLearning.AI: {e}")
-    return items
+        print(f"    [ERR] 无法访问 {url[:60]}: {e}")
+        return None
 
 
-def crawl_nvidia_blog() -> list[dict]:
-    """抓取 NVIDIA Developer Blog AI 相关文章"""
-    items = []
-    try:
-        print("  [FETCH] NVIDIA Developer Blog ...")
-        resp = requests.get(
-            "https://developer.nvidia.com/blog/category/ai/",
-            headers=HEADERS, timeout=15
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+def extract_article_text(url: str, max_chars: int = 3000) -> str:
+    """进入文章详情页，提取正文文本"""
+    soup = fetch_page(url)
+    if not soup:
+        return ""
 
-        posts = soup.select("article h2 a, .post-title a, h3.entry-title a")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://developer.nvidia.com" + href
-            seen_urls.add(href)
+    for tag in soup.select(
+        "nav, header, footer, script, style, aside, "
+        ".sidebar, .nav, .menu, .cookie, .ad, .share, .related"
+    ):
+        tag.decompose()
 
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
+    content_selectors = [
+        "article", "main", "[role='main']",
+        ".post-content", ".entry-content", ".article-content",
+        ".blog-content", ".prose", ".content-body",
+    ]
+    content_el = None
+    for sel in content_selectors:
+        content_el = soup.select_one(sel)
+        if content_el:
+            break
+    if not content_el:
+        content_el = soup.body or soup
 
-            category = "模型技术"
-            if "agent" in title.lower():
-                category = "Agent智能体"
-            elif "tool" in title.lower() or "deploy" in title.lower():
-                category = "应用落地与工具"
+    paragraphs = content_el.find_all(["p", "h1", "h2", "h3", "li"])
+    text_parts = []
+    total = 0
+    for p in paragraphs:
+        t = p.get_text(strip=True)
+        if len(t) < 10:
+            continue
+        text_parts.append(t)
+        total += len(t)
+        if total >= max_chars:
+            break
 
-            items.append({
-                "date": get_now_iso(),
-                "platform": "NVIDIA Developer Blog",
-                "category": category,
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] NVIDIA: {e}")
-    return items
-
-
-def crawl_huggingface() -> list[dict]:
-    """抓取 Hugging Face Blog"""
-    items = []
-    try:
-        print("  [FETCH] Hugging Face Blog ...")
-        resp = requests.get("https://huggingface.co/blog", headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("article a[href*='/blog/'], a.block[href*='/blog/']")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href == "/blog" or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://huggingface.co" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "Hugging Face",
-                "category": "模型技术",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] Hugging Face: {e}")
-    return items
-
-
-def crawl_openai() -> list[dict]:
-    """抓取 OpenAI Blog"""
-    items = []
-    try:
-        print("  [FETCH] OpenAI Blog ...")
-        resp = requests.get("https://openai.com/blog", headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("a[href*='/index/']") or soup.select("a[href*='/blog/']")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href == "/blog" or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://openai.com" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "OpenAI",
-                "category": "模型技术",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] OpenAI: {e}")
-    return items
-
-
-def crawl_anthropic() -> list[dict]:
-    """抓取 Anthropic News"""
-    items = []
-    try:
-        print("  [FETCH] Anthropic News ...")
-        resp = requests.get("https://www.anthropic.com/news", headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("a[href*='/news/']")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href == "/news" or href == "/news/" or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://www.anthropic.com" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "Anthropic",
-                "category": "Agent智能体",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] Anthropic: {e}")
-    return items
-
-
-def crawl_openai_academy() -> list[dict]:
-    """抓取 OpenAI Academy 活动和课程"""
-    items = []
-    try:
-        print("  [FETCH] OpenAI Academy ...")
-        resp = requests.get("https://academy.openai.com", headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("a[href*='/events/'], a[href*='/courses/'], a[href*='/catalog/']")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://academy.openai.com" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "OpenAI Academy",
-                "category": "Agent智能体",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] OpenAI Academy: {e}")
-    return items
-
-
-def crawl_google_ai() -> list[dict]:
-    """抓取 Google Grow with Google AI 内容"""
-    items = []
-    try:
-        print("  [FETCH] Google Grow with Google AI ...")
-        resp = requests.get("https://grow.google/ai/", headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("a[href*='grow.google'], a[href*='/courses/'], a[href*='/ai']")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href in seen_urls or len(href) < 10:
-                continue
-            if not href.startswith("http"):
-                href = "https://grow.google" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "Google Grow with Google",
-                "category": "模型技术",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] Google AI: {e}")
-    return items
-
-
-def crawl_ibm_skillsbuild() -> list[dict]:
-    """抓取 IBM SkillsBuild 活动和课程"""
-    items = []
-    try:
-        print("  [FETCH] IBM SkillsBuild ...")
-        resp = requests.get("https://skillsbuild.org/events", headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("a[href*='/events/'], a[href*='/courses/'], a[href*='skillsbuild']")
-        seen_urls = set()
-        for a in posts[:8]:
-            href = a.get("href", "")
-            if not href or href in seen_urls or len(href) < 10:
-                continue
-            if not href.startswith("http"):
-                href = "https://skillsbuild.org" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "IBM SkillsBuild",
-                "category": "行业生态与政策",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] IBM SkillsBuild: {e}")
-    return items
-
-
-def crawl_nvidia_cuda() -> list[dict]:
-    """抓取 NVIDIA CUDA/开发者工具更新"""
-    items = []
-    try:
-        print("  [FETCH] NVIDIA Developer (CUDA & Tools) ...")
-        resp = requests.get(
-            "https://developer.nvidia.com/blog/category/developer-tools/",
-            headers=HEADERS, timeout=15
-        )
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("article h2 a, .post-title a, h3.entry-title a")
-        seen_urls = set()
-        for a in posts[:5]:
-            href = a.get("href", "")
-            if not href or href in seen_urls:
-                continue
-            if not href.startswith("http"):
-                href = "https://developer.nvidia.com" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "NVIDIA Developer",
-                "category": "应用落地与工具",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [ERR] NVIDIA CUDA: {e}")
-    return items
-
-
-def crawl_meta_ai() -> list[dict]:
-    """抓取 Meta AI Resources（可能报错，容错处理）"""
-    items = []
-    try:
-        print("  [FETCH] Meta AI ...")
-        resp = requests.get("https://ai.meta.com/resources/", headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        posts = soup.select("a[href*='/resources/'], a[href*='/blog/'], a[href*='/research/']")
-        seen_urls = set()
-        for a in posts[:5]:
-            href = a.get("href", "")
-            if not href or href in seen_urls or len(href) < 10:
-                continue
-            if not href.startswith("http"):
-                href = "https://ai.meta.com" + href
-            seen_urls.add(href)
-
-            title = a.get_text(strip=True)
-            if not title or len(title) < 10:
-                continue
-
-            items.append({
-                "date": get_now_iso(),
-                "platform": "Meta AI",
-                "category": "模型技术",
-                "summary": title[:200],
-                "cn_text": title,
-                "url": href,
-                "en_text": title,
-            })
-
-        print(f"    [OK] 获取 {len(items)} 条")
-    except Exception as e:
-        print(f"    [SKIP] Meta AI（页面不可用，已跳过）: {e}")
-    return items
-
-
-def fetch_all_news() -> list[dict]:
-    """汇总所有 10 个资讯源（含 3 个容错源）"""
-    all_items = []
-    # 7 个稳定源
-    all_items.extend(crawl_deeplearning_ai())
-    all_items.extend(crawl_nvidia_blog())
-    all_items.extend(crawl_nvidia_cuda())
-    all_items.extend(crawl_huggingface())
-    all_items.extend(crawl_openai())
-    all_items.extend(crawl_openai_academy())
-    all_items.extend(crawl_anthropic())
-    all_items.extend(crawl_google_ai())
-    all_items.extend(crawl_ibm_skillsbuild())
-    # 容错源（可能失败，不影响整体）
-    all_items.extend(crawl_meta_ai())
-    return all_items
-
-
-NOISE_KEYWORDS = [
-    "learn more", "sign up", "register", "subscribe", "cookie",
-    "privacy", "terms of", "log in", "menu", "navigation",
-    "skip to content", "search", "footer", "header",
-]
+    return "\n".join(text_parts)
 
 
 def is_noise(text: str) -> bool:
-    """判断是否为噪音内容（导航、按钮文字等）"""
     t = text.lower().strip()
-    if len(t) < 20:
+    if len(t) < 15:
         return True
     for kw in NOISE_KEYWORDS:
         if t == kw or t.startswith(kw):
@@ -487,54 +144,290 @@ def is_noise(text: str) -> bool:
     return False
 
 
-def has_chinese(text: str) -> bool:
-    """判断文本是否包含中文"""
-    return any('\u4e00' <= c <= '\u9fff' for c in text)
+# ── 免费翻译 ──────────────────────────────────────────
+
+def translate_to_chinese(text: str) -> str:
+    """使用 Google Translate 免费 API 翻译为中文"""
+    if not text or len(text.strip()) < 5:
+        return text
+
+    chunks = _split_text(text, max_len=4500)
+    translated_parts = []
+
+    for chunk in chunks:
+        result = _google_translate_chunk(chunk)
+        if result:
+            translated_parts.append(result)
+        else:
+            translated_parts.append(chunk)
+        if len(chunks) > 1:
+            time.sleep(0.5)
+
+    return "".join(translated_parts)
 
 
-def clean_item(item: dict) -> dict | None:
-    """清洗单条资讯数据，不合格返回 None"""
-    summary = (item.get("summary") or "").strip()
-    cn_text = (item.get("cn_text") or "").strip()
-    url = (item.get("url") or "").strip()
-    en_text = (item.get("en_text") or "").strip()
+def _split_text(text: str, max_len: int = 4500) -> list[str]:
+    """按句子边界拆分长文本"""
+    if len(text) <= max_len:
+        return [text]
 
-    if not url:
+    chunks = []
+    current = ""
+    for sentence in re.split(r'(?<=[.!?。！？\n])\s*', text):
+        if len(current) + len(sentence) > max_len and current:
+            chunks.append(current)
+            current = sentence
+        else:
+            current += (" " if current else "") + sentence
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _google_translate_chunk(text: str, retries: int = 3) -> str | None:
+    """调用 Google Translate 免费接口翻译单段文本，失败时尝试备用接口"""
+    apis = [
+        {
+            "url": "https://translate.googleapis.com/translate_a/single",
+            "params": {"client": "gtx", "sl": "en", "tl": "zh-CN", "dt": "t", "q": text},
+        },
+        {
+            "url": "https://translate.google.com/translate_a/single",
+            "params": {"client": "gtx", "sl": "en", "tl": "zh-CN", "dt": "t", "q": text},
+        },
+    ]
+    for api in apis:
+        for attempt in range(retries):
+            try:
+                resp = requests.get(
+                    api["url"], params=api["params"], headers=HEADERS, timeout=10,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                if result and result[0]:
+                    translated = "".join(
+                        part[0] for part in result[0] if part[0]
+                    )
+                    if translated:
+                        return translated
+            except Exception:
+                if attempt < retries - 1:
+                    time.sleep(1.5 * (attempt + 1))
+        print(f"    [WARN] 翻译接口 {api['url'][:40]} 失败，尝试下一个")
+    print(f"    [ERR] 所有翻译接口均失败")
+    return None
+
+
+# ── 智能分类 ──────────────────────────────────────────
+
+def classify_article(title: str, body: str) -> str:
+    """基于关键词匹配判断文章分类"""
+    combined = (title + " " + body[:1000]).lower()
+    scores = {}
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in combined)
+        scores[cat] = score
+
+    best = max(scores, key=scores.get)
+    if scores[best] > 0:
+        return best
+    return "行业生态与政策"
+
+
+def make_summary(text: str, max_len: int = 120) -> str:
+    """从翻译后的中文文本中提取前几句作为摘要"""
+    sentences = re.split(r'[。！？\n]', text)
+    summary = ""
+    for s in sentences:
+        s = s.strip()
+        if len(s) < 5:
+            continue
+        if len(summary) + len(s) + 1 > max_len:
+            break
+        summary += s + "。"
+    return summary if summary else text[:max_len]
+
+
+# ── 各资讯源爬虫（列表页 → 标题+URL） ────────────────
+
+def crawl_list_page(
+    name: str,
+    url: str,
+    link_selector: str,
+    base_url: str,
+    exclude_hrefs: set | None = None,
+    max_items: int = 8,
+) -> list[dict]:
+    """通用列表页爬虫"""
+    items = []
+    exclude_hrefs = exclude_hrefs or set()
+
+    print(f"  [FETCH] {name} ...")
+    soup = fetch_page(url)
+    if not soup:
+        return items
+
+    links = soup.select(link_selector)
+    seen = set()
+    for a in links:
+        if len(items) >= max_items:
+            break
+        href = a.get("href", "")
+        if not href or href in seen or href in exclude_hrefs:
+            continue
+        if not href.startswith("http"):
+            href = base_url.rstrip("/") + "/" + href.lstrip("/")
+        if href in seen:
+            continue
+        seen.add(href)
+
+        title = a.get_text(strip=True)
+        if not title or len(title) < 10 or is_noise(title):
+            continue
+
+        items.append({"title": title, "url": href, "platform": name})
+
+    print(f"    [OK] 列表页获取 {len(items)} 条链接")
+    return items
+
+
+def fetch_all_links() -> list[dict]:
+    """从10个资讯源获取文章链接列表"""
+    all_links = []
+
+    all_links.extend(crawl_list_page(
+        "DeepLearning.AI", "https://www.deeplearning.ai/the-batch/",
+        "a[href*='/the-batch/']", "https://www.deeplearning.ai",
+        exclude_hrefs={"/the-batch/", "/the-batch"},
+    ))
+    all_links.extend(crawl_list_page(
+        "NVIDIA Developer Blog",
+        "https://developer.nvidia.com/blog/category/ai/",
+        "article h2 a, .post-title a, h3.entry-title a",
+        "https://developer.nvidia.com",
+    ))
+    all_links.extend(crawl_list_page(
+        "NVIDIA Developer Tools",
+        "https://developer.nvidia.com/blog/category/developer-tools/",
+        "article h2 a, .post-title a, h3.entry-title a",
+        "https://developer.nvidia.com",
+        max_items=5,
+    ))
+    all_links.extend(crawl_list_page(
+        "Hugging Face Blog", "https://huggingface.co/blog",
+        "article a[href*='/blog/'], a.block[href*='/blog/']",
+        "https://huggingface.co",
+        exclude_hrefs={"/blog", "/blog/"},
+    ))
+    all_links.extend(crawl_list_page(
+        "OpenAI Blog", "https://openai.com/blog",
+        "a[href*='/index/'], a[href*='/blog/']", "https://openai.com",
+        exclude_hrefs={"/blog", "/blog/"},
+    ))
+    all_links.extend(crawl_list_page(
+        "Anthropic News", "https://www.anthropic.com/news",
+        "a[href*='/news/']", "https://www.anthropic.com",
+        exclude_hrefs={"/news", "/news/"},
+    ))
+    all_links.extend(crawl_list_page(
+        "OpenAI Academy", "https://academy.openai.com",
+        "a[href*='/events/'], a[href*='/courses/'], a[href*='/catalog/']",
+        "https://academy.openai.com",
+    ))
+    all_links.extend(crawl_list_page(
+        "Google Grow with Google", "https://grow.google/ai/",
+        "a[href*='grow.google'], a[href*='/courses/'], a[href*='/ai']",
+        "https://grow.google",
+    ))
+    all_links.extend(crawl_list_page(
+        "IBM SkillsBuild", "https://skillsbuild.org/events",
+        "a[href*='/events/'], a[href*='/courses/'], a[href*='skillsbuild']",
+        "https://skillsbuild.org",
+    ))
+    try:
+        all_links.extend(crawl_list_page(
+            "Meta AI", "https://ai.meta.com/blog/",
+            "a[href*='/blog/'], a[href*='/research/']",
+            "https://ai.meta.com",
+            max_items=5,
+        ))
+    except Exception as e:
+        print(f"  [SKIP] Meta AI: {e}")
+
+    return all_links
+
+
+# ── 核心流程：抓正文 + 翻译 ──────────────────────────
+
+def process_article(link: dict) -> dict | None:
+    """对单篇文章：抓正文 → 翻译 → 分类 → 组装"""
+    title = link["title"]
+    url = link["url"]
+    platform = link["platform"]
+
+    try:
+        print(f"    [DETAIL] {platform}: {title[:50]}...")
+
+        body = extract_article_text(url)
+        if len(body) < 30:
+            print(f"      [WARN] 正文太短({len(body)}字符)")
+            body = title
+
+        en_full = _make_en_summary(title, body, max_len=1500)
+        en_short = _make_en_summary(title, body, max_len=300)
+        category = classify_article(title, body)
+
+        cn_detail = translate_to_chinese(en_full)
+        if not cn_detail or len(cn_detail) < 30:
+            print(f"      [SKIP] 翻译结果为空或太短")
+            return None
+
+        cn_summary = make_summary(cn_detail, max_len=120)
+
+        if cn_summary == cn_detail:
+            cn_detail = cn_summary + "（详见原文）"
+
+        if len(cn_detail) < 50:
+            print(f"      [SKIP] 中文内容太短({len(cn_detail)}字)")
+            return None
+
+        print(f"      [OK] 分类={category}, 摘要={len(cn_summary)}字, 详情={len(cn_detail)}字")
+
+        return {
+            "date": get_now_iso(),
+            "platform": platform,
+            "category": category,
+            "priority": PRIORITY_MAP.get(category, 2),
+            "summary": cn_summary,
+            "cn_text": cn_detail,
+            "url": url,
+            "en_text": en_short[:300],
+            "likes": 0,
+        }
+    except Exception as e:
+        print(f"      [ERR] 处理异常: {e}")
         return None
 
-    # 过滤噪音内容
-    if is_noise(summary):
-        return None
 
-    # summary 必须有实质长度（至少30字符）
-    if len(summary) < 30:
-        return None
+def _make_en_summary(title: str, body: str, max_len: int = 1500) -> str:
+    """从英文正文提取关键内容（标题 + 前N段正文）"""
+    parts = [title + "."]
+    remaining = max_len - len(title)
 
-    # cn_text 必须有实质内容且与 summary 不同（证明有翻译/编辑）
-    if len(cn_text) < 50:
-        return None
-    if cn_text == summary and not has_chinese(cn_text):
-        return None
+    for paragraph in body.split("\n"):
+        paragraph = paragraph.strip()
+        if len(paragraph) < 15:
+            continue
+        if remaining <= 0:
+            break
+        parts.append(paragraph)
+        remaining -= len(paragraph)
 
-    return {
-        "date": (item.get("date") or get_now_iso()).strip(),
-        "platform": (item.get("platform") or "Unknown").strip(),
-        "category": (item.get("category") or "行业生态与政策").strip(),
-        "priority": PRIORITY_MAP.get(item.get("category", ""), 2),
-        "summary": summary,
-        "cn_text": cn_text,
-        "url": url,
-        "en_text": en_text,
-        "likes": 0,
-    }
+    return " ".join(parts)
 
 
 def insert_to_supabase(items: list[dict]) -> tuple[int, int]:
-    """将清洗后的数据插入 Supabase ai_news 表（URL 已存在则跳过，绝不覆盖）
-
-    Returns:
-        (inserted, skipped): 新增条数和跳过条数
-    """
+    """插入 Supabase（URL 已存在则跳过）"""
     if not items:
         print("  [WARN] 没有数据需要写入")
         return 0, 0
@@ -549,13 +442,8 @@ def insert_to_supabase(items: list[dict]) -> tuple[int, int]:
         if item["url"] in existing_urls:
             skipped += 1
             continue
-
         try:
-            result = (
-                supabase.table("ai_news")
-                .insert(item)
-                .execute()
-            )
+            result = supabase.table("ai_news").insert(item).execute()
             if result.data:
                 inserted += 1
                 existing_urls.add(item["url"])
@@ -565,33 +453,55 @@ def insert_to_supabase(items: list[dict]) -> tuple[int, int]:
     return inserted, skipped
 
 
+# ── 主入口 ────────────────────────────────────────────
+
 def main():
-    """主入口"""
     print("=" * 60)
-    print("  每日AI前沿 - 云原生爬虫")
+    print("  每日AI前沿 - 云原生爬虫（免费翻译版）")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Supabase: {SUPABASE_URL}")
     print("=" * 60)
     print()
 
-    # 1. 抓取资讯
-    print("[1/3] 正在抓取资讯...")
-    raw_items = fetch_all_news()
-    print(f"  共获取 {len(raw_items)} 条原始数据\n")
+    # 1. 抓取列表页链接
+    print("[1/4] 正在抓取各站点文章链接...")
+    all_links = fetch_all_links()
+    print(f"  共获取 {len(all_links)} 条文章链接\n")
 
-    # 2. 数据清洗（严格质量过滤）
-    print("[2/3] 正在清洗数据...")
-    cleaned = [r for r in (clean_item(item) for item in raw_items) if r is not None]
-    print(f"  清洗后有效数据 {len(cleaned)} 条（过滤了 {len(raw_items) - len(cleaned)} 条低质量内容）\n")
+    # 2. 去重：跳过已在数据库中的 URL
+    print("[2/4] 正在去重...")
+    existing = supabase.table("ai_news").select("url").execute()
+    existing_urls = {r["url"] for r in (existing.data or [])}
+    new_links = [l for l in all_links if l["url"] not in existing_urls]
+    print(f"  {len(new_links)} 条新链接（跳过 {len(all_links) - len(new_links)} 条已存在）\n")
 
-    # 3. 写入 Supabase（仅新增，不覆盖已有数据）
-    print("[3/3] 正在写入 Supabase...")
-    inserted, skipped = insert_to_supabase(cleaned)
-    print(f"  新增 {inserted} 条，跳过 {skipped} 条已存在\n")
+    if not new_links:
+        print("没有新文章，本次任务结束。")
+        return
+
+    # 3. 逐篇：抓正文 + 翻译
+    print(f"[3/4] 正在处理 {len(new_links)} 篇新文章（抓正文+翻译）...")
+    processed = []
+    for i, link in enumerate(new_links, 1):
+        print(f"  [{i}/{len(new_links)}]")
+        result = process_article(link)
+        if result:
+            processed.append(result)
+        time.sleep(1)
+    print(f"  成功处理 {len(processed)} 篇\n")
+
+    # 4. 写入 Supabase
+    print("[4/4] 正在写入 Supabase...")
+    inserted, skipped = insert_to_supabase(processed)
+    print(f"  新增 {inserted} 条，跳过 {skipped} 条\n")
 
     print("=" * 60)
-    print(f"  任务完成！新增 {inserted} 条，跳过 {skipped} 条")
+    print(f"  任务完成！新增 {inserted} 条")
     print("=" * 60)
+
+    if inserted == 0 and len(new_links) > 0 and len(processed) == 0:
+        print("\n[!] 有新文章但处理全部失败（翻译可能被限流），触发重试")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -2,14 +2,15 @@ name: 每日AI资讯抓取
 
 on:
   schedule:
-    # 每天北京时间 9:00（UTC+8）= UTC 1:00
-    - cron: '0 1 * * *'
+    # 北京时间凌晨 3:00（UTC 19:00 前一天），Google 翻译 API 低峰期
+    - cron: '0 19 * * *'
   workflow_dispatch:
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 15
+
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -27,5 +28,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run crawler
-        run: python main.py
+      - name: Run crawler (with retry)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 120
+          command: python main.py
