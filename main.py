@@ -529,27 +529,40 @@ def clean_item(item: dict) -> dict | None:
     }
 
 
-def upsert_to_supabase(items: list[dict]) -> int:
-    """将清洗后的数据 upsert 到 Supabase ai_news 表"""
+def insert_to_supabase(items: list[dict]) -> tuple[int, int]:
+    """将清洗后的数据插入 Supabase ai_news 表（URL 已存在则跳过，绝不覆盖）
+
+    Returns:
+        (inserted, skipped): 新增条数和跳过条数
+    """
     if not items:
         print("  [WARN] 没有数据需要写入")
-        return 0
+        return 0, 0
 
-    success_count = 0
+    existing = supabase.table("ai_news").select("url").execute()
+    existing_urls = {r["url"] for r in (existing.data or [])}
+
+    inserted = 0
+    skipped = 0
 
     for item in items:
+        if item["url"] in existing_urls:
+            skipped += 1
+            continue
+
         try:
             result = (
                 supabase.table("ai_news")
-                .upsert(item, on_conflict="url")
+                .insert(item)
                 .execute()
             )
             if result.data:
-                success_count += 1
+                inserted += 1
+                existing_urls.add(item["url"])
         except Exception as e:
             print(f"  [ERR] 写入失败 ({item.get('url', 'N/A')[:50]}): {e}")
 
-    return success_count
+    return inserted, skipped
 
 
 def main():
@@ -571,13 +584,13 @@ def main():
     cleaned = [r for r in (clean_item(item) for item in raw_items) if r is not None]
     print(f"  清洗后有效数据 {len(cleaned)} 条（过滤了 {len(raw_items) - len(cleaned)} 条低质量内容）\n")
 
-    # 3. 写入 Supabase
+    # 3. 写入 Supabase（仅新增，不覆盖已有数据）
     print("[3/3] 正在写入 Supabase...")
-    count = upsert_to_supabase(cleaned)
-    print(f"  成功写入/更新 {count} 条\n")
+    inserted, skipped = insert_to_supabase(cleaned)
+    print(f"  新增 {inserted} 条，跳过 {skipped} 条已存在\n")
 
     print("=" * 60)
-    print(f"  任务完成！共处理 {count}/{len(cleaned)} 条资讯")
+    print(f"  任务完成！新增 {inserted} 条，跳过 {skipped} 条")
     print("=" * 60)
 
 

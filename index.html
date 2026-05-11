@@ -326,8 +326,8 @@
     <div class="filters">
       <div class="pill-group" id="pills">
         <button class="pill on" data-p="">全部</button>
-        <button class="pill" data-p="0">P0 紧急</button>
-        <button class="pill" data-p="1">P1 重要</button>
+        <button class="pill" data-p="0">P0 非常相关</button>
+        <button class="pill" data-p="1">P1 相关</button>
         <button class="pill" data-p="2">P2 关注</button>
       </div>
       <div class="sep"></div>
@@ -547,14 +547,14 @@ function updateStats() {
   const c = S.counts;
   $('#stats').innerHTML = `
     <span class="s"><span class="dot" style="background:#fff"></span> 共 <b>${c.total}</b> 条</span>
-    <span class="s"><span class="dot" style="background:var(--p0)"></span> P0 ${c.p0}</span>
-    <span class="s"><span class="dot" style="background:var(--p1)"></span> P1 ${c.p1}</span>
+    <span class="s"><span class="dot" style="background:var(--p0)"></span> 非常相关 ${c.p0}</span>
+    <span class="s"><span class="dot" style="background:var(--p1)"></span> 相关 ${c.p1}</span>
     <span class="s"><span class="dot" style="background:var(--p2)"></span> P2 ${c.p2}</span>`;
 
   const pills = $$('#pills .pill');
   if (pills[0]) pills[0].textContent = `全部 (${c.total})`;
-  if (pills[1]) pills[1].textContent = `P0 紧急 (${c.p0})`;
-  if (pills[2]) pills[2].textContent = `P1 重要 (${c.p1})`;
+  if (pills[1]) pills[1].textContent = `P0 非常相关 (${c.p0})`;
+  if (pills[2]) pills[2].textContent = `P1 相关 (${c.p1})`;
   if (pills[3]) pills[3].textContent = `P2 关注 (${c.p2})`;
 }
 
