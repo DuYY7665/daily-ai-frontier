@@ -1,0 +1,35 @@
+# ═══════════════════════════════════════════════════════
+#  每日AI前沿 - systemd 服务文件（开机自启）
+#
+#  安装方法:
+#    1. 将此文件复制到服务器: /etc/systemd/system/ai-news.service
+#    2. 执行: sudo systemctl daemon-reload
+#    3. 执行: sudo systemctl enable ai-news    # 开机自启
+#    4. 执行: sudo systemctl start ai-news     # 立即启动
+#
+#  常用命令:
+#    查看状态: sudo systemctl status ai-news
+#    停止服务: sudo systemctl stop ai-news
+#    重启服务: sudo systemctl restart ai-news
+#    查看日志: sudo journalctl -u ai-news -f
+# ═══════════════════════════════════════════════════════
+
+[Unit]
+Description=AI News Daily Service
+After=network.target
+
+[Service]
+Type=simple
+# 如果 Python3 路径不同，用 which python3 查看
+ExecStart=/usr/bin/python3 /opt/ai-news/serve.py
+WorkingDirectory=/opt/ai-news
+Restart=always
+RestartSec=5
+
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ai-news
+
+[Install]
+WantedBy=multi-user.target

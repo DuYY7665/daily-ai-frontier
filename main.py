@@ -1,27 +1,49 @@
 # -*- coding: utf-8 -*-
-"""每日AI前沿 - 云原生爬虫主程序（Supabase 版）
+"""每日AI前沿 - 爬虫主程序（SQLite 版）
 
 从多个 AI 资讯源抓取最新资讯，抓取正文并翻译为中文，
-清洗后写入 Supabase（PostgreSQL）。通过 GitHub Actions 每日定时触发。
+清洗后写入本地 SQLite 数据库。通过 cron 定时触发。
 全程免费，无需付费 API。
 """
 
 import os
 import re
 import time
+import sqlite3
 import requests
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
-from supabase import create_client, Client
 
-# ── 环境变量 ──────────────────────────────────────────
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# ── 数据库配置 ──────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "ai_news.db")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("缺少 SUPABASE_URL 或 SUPABASE_KEY")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+def _ensure_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            category TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 2,
+            summary TEXT,
+            cn_text TEXT,
+            url TEXT UNIQUE NOT NULL,
+            en_text TEXT,
+            likes INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pd ON news(priority ASC, date DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_date ON news(date DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cat ON news(category)")
+    conn.commit()
+    conn.close()
+
+
+_ensure_db()
 
 # ── 常量 ──────────────────────────────────────────────
 PRIORITY_MAP = {
@@ -432,30 +454,46 @@ def _make_en_summary(title: str, body: str, max_len: int = 1500) -> str:
     return " ".join(parts)
 
 
-def insert_to_supabase(items: list[dict]) -> tuple[int, int]:
-    """插入 Supabase（URL 已存在则跳过）"""
+def get_existing_urls() -> set:
+    """从 SQLite 获取所有已存在的 URL"""
+    conn = sqlite3.connect(DB_PATH)
+    urls = {r[0] for r in conn.execute("SELECT url FROM news").fetchall()}
+    conn.close()
+    return urls
+
+
+def insert_to_db(items: list[dict]) -> tuple[int, int]:
+    """插入 SQLite（URL 已存在则跳过）"""
     if not items:
         print("  [WARN] 没有数据需要写入")
         return 0, 0
 
-    existing = supabase.table("ai_news").select("url").execute()
-    existing_urls = {r["url"] for r in (existing.data or [])}
-
+    conn = sqlite3.connect(DB_PATH)
     inserted = 0
     skipped = 0
 
     for item in items:
-        if item["url"] in existing_urls:
-            skipped += 1
-            continue
         try:
-            result = supabase.table("ai_news").insert(item).execute()
-            if result.data:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO news "
+                "(date, platform, category, priority, summary, cn_text, url, en_text, likes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    item["date"], item["platform"], item["category"],
+                    item["priority"], item["summary"], item["cn_text"],
+                    item["url"], item["en_text"], item.get("likes", 0),
+                ),
+            )
+            if cursor.rowcount > 0:
                 inserted += 1
-                existing_urls.add(item["url"])
+            else:
+                skipped += 1
         except Exception as e:
             print(f"  [ERR] 写入失败 ({item.get('url', 'N/A')[:50]}): {e}")
+            skipped += 1
 
+    conn.commit()
+    conn.close()
     return inserted, skipped
 
 
@@ -463,9 +501,9 @@ def insert_to_supabase(items: list[dict]) -> tuple[int, int]:
 
 def main():
     print("=" * 60)
-    print("  每日AI前沿 - 云原生爬虫（免费翻译版）")
+    print("  每日AI前沿 - 爬虫（SQLite 版）")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Supabase: {SUPABASE_URL}")
+    print(f"  数据库: {DB_PATH}")
     print("=" * 60)
     print()
 
@@ -476,8 +514,7 @@ def main():
 
     # 2. 去重：跳过已在数据库中的 URL
     print("[2/4] 正在去重...")
-    existing = supabase.table("ai_news").select("url").execute()
-    existing_urls = {r["url"] for r in (existing.data or [])}
+    existing_urls = get_existing_urls()
     new_links = [l for l in all_links if l["url"] not in existing_urls]
     print(f"  {len(new_links)} 条新链接（跳过 {len(all_links) - len(new_links)} 条已存在）\n")
 
@@ -496,9 +533,9 @@ def main():
         time.sleep(1)
     print(f"  成功处理 {len(processed)} 篇\n")
 
-    # 4. 写入 Supabase
-    print("[4/4] 正在写入 Supabase...")
-    inserted, skipped = insert_to_supabase(processed)
+    # 4. 写入 SQLite
+    print("[4/4] 正在写入数据库...")
+    inserted, skipped = insert_to_db(processed)
     print(f"  新增 {inserted} 条，跳过 {skipped} 条\n")
 
     print("=" * 60)
