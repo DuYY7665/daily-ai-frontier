@@ -167,13 +167,36 @@ def is_noise(text: str) -> bool:
     return False
 
 
-# ── 翻译（DeepL 优先，Google 备选）─────────────────────
+# ── 翻译（阿里翻译优先，Google 备选）─────────────────────
 
-DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "")
+ALIYUN_AK_ID = os.environ.get("ALIYUN_AK_ID", "")
+ALIYUN_AK_SECRET = os.environ.get("ALIYUN_AK_SECRET", "")
+
+_ali_client = None
+
+
+def _get_ali_client():
+    """懒加载阿里翻译客户端"""
+    global _ali_client
+    if _ali_client is None and ALIYUN_AK_ID and ALIYUN_AK_SECRET:
+        try:
+            from alibabacloud_alimt20181012.client import Client
+            from alibabacloud_tea_openapi.models import Config
+            config = Config(
+                access_key_id=ALIYUN_AK_ID,
+                access_key_secret=ALIYUN_AK_SECRET,
+                endpoint="mt.aliyuncs.com",
+            )
+            _ali_client = Client(config)
+        except ImportError:
+            print("  [WARN] 阿里翻译 SDK 未安装，回退到 Google")
+        except Exception as e:
+            print(f"  [WARN] 阿里翻译初始化失败: {e}")
+    return _ali_client
 
 
 def translate_to_chinese(text: str) -> str:
-    """翻译英文为中文：优先 DeepL API，失败时回退到 Google 翻译"""
+    """翻译英文为中文：优先阿里翻译，失败时回退到 Google"""
     if not text or len(text.strip()) < 5:
         return text
 
@@ -182,8 +205,8 @@ def translate_to_chinese(text: str) -> str:
 
     for chunk in chunks:
         result = None
-        if DEEPL_API_KEY:
-            result = _deepl_translate_chunk(chunk)
+        if ALIYUN_AK_ID:
+            result = _ali_translate_chunk(chunk)
         if not result:
             result = _google_translate_chunk(chunk)
         translated_parts.append(result if result else chunk)
@@ -211,35 +234,32 @@ def _split_text(text: str, max_len: int = 4500) -> list[str]:
     return chunks
 
 
-def _deepl_translate_chunk(text: str, retries: int = 2) -> str | None:
-    """调用 DeepL API Free 翻译"""
-    url = "https://api-free.deepl.com/v2/translate"
-    headers = {
-        "Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "text": [text],
-        "target_lang": "ZH",
-        "source_lang": "EN",
-    }
+def _ali_translate_chunk(text: str, retries: int = 2) -> str | None:
+    """调用阿里云机器翻译 API"""
+    client = _get_ali_client()
+    if not client:
+        return None
+
+    from alibabacloud_alimt20181012.models import TranslateGeneralRequest
+
+    req = TranslateGeneralRequest(
+        format_type="text",
+        source_language="en",
+        target_language="zh",
+        source_text=text,
+        scene="general",
+    )
 
     for attempt in range(retries):
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=15)
-            if resp.status_code == 456:
-                print("      [WARN] DeepL 额度用尽，回退到 Google")
-                return None
-            resp.raise_for_status()
-            result = resp.json()
-            translated = result["translations"][0]["text"]
-            if translated:
-                return translated
+            resp = client.translate_general(req)
+            if resp.body and resp.body.code == 200:
+                return resp.body.data.translated
         except Exception as e:
             if attempt < retries - 1:
                 time.sleep(1)
             else:
-                print(f"      [WARN] DeepL 翻译失败: {e}")
+                print(f"      [WARN] 阿里翻译失败: {e}")
     return None
 
 
@@ -538,7 +558,7 @@ def main():
     print("  每日AI前沿 - 爬虫（SQLite 版）")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  数据库: {DB_PATH}")
-    print(f"  翻译引擎: {'DeepL API' if DEEPL_API_KEY else 'Google Translate (备选)'}")
+    print(f"  翻译引擎: {'阿里翻译 API' if ALIYUN_AK_ID else 'Google Translate (备选)'}")
     print("=" * 60)
     print()
 
