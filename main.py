@@ -8,6 +8,7 @@
 
 import os
 import re
+import sys
 import time
 import sqlite3
 import requests
@@ -166,10 +167,13 @@ def is_noise(text: str) -> bool:
     return False
 
 
-# ── 免费翻译 ──────────────────────────────────────────
+# ── 翻译（DeepL 优先，Google 备选）─────────────────────
+
+DEEPL_API_KEY = os.environ.get("DEEPL_API_KEY", "")
+
 
 def translate_to_chinese(text: str) -> str:
-    """使用 Google Translate 免费 API 翻译为中文"""
+    """翻译英文为中文：优先 DeepL API，失败时回退到 Google 翻译"""
     if not text or len(text.strip()) < 5:
         return text
 
@@ -177,13 +181,14 @@ def translate_to_chinese(text: str) -> str:
     translated_parts = []
 
     for chunk in chunks:
-        result = _google_translate_chunk(chunk)
-        if result:
-            translated_parts.append(result)
-        else:
-            translated_parts.append(chunk)
+        result = None
+        if DEEPL_API_KEY:
+            result = _deepl_translate_chunk(chunk)
+        if not result:
+            result = _google_translate_chunk(chunk)
+        translated_parts.append(result if result else chunk)
         if len(chunks) > 1:
-            time.sleep(0.5)
+            time.sleep(0.3)
 
     return "".join(translated_parts)
 
@@ -206,8 +211,40 @@ def _split_text(text: str, max_len: int = 4500) -> list[str]:
     return chunks
 
 
+def _deepl_translate_chunk(text: str, retries: int = 2) -> str | None:
+    """调用 DeepL API Free 翻译"""
+    url = "https://api-free.deepl.com/v2/translate"
+    headers = {
+        "Authorization": f"DeepL-Auth-Key {DEEPL_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "text": [text],
+        "target_lang": "ZH",
+        "source_lang": "EN",
+    }
+
+    for attempt in range(retries):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            if resp.status_code == 456:
+                print("      [WARN] DeepL 额度用尽，回退到 Google")
+                return None
+            resp.raise_for_status()
+            result = resp.json()
+            translated = result["translations"][0]["text"]
+            if translated:
+                return translated
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1)
+            else:
+                print(f"      [WARN] DeepL 翻译失败: {e}")
+    return None
+
+
 def _google_translate_chunk(text: str, retries: int = 3) -> str | None:
-    """调用 Google Translate 免费接口翻译单段文本，失败时尝试备用接口"""
+    """调用 Google Translate 免费接口（备选）"""
     apis = [
         {
             "url": "https://translate.googleapis.com/translate_a/single",
@@ -235,7 +272,7 @@ def _google_translate_chunk(text: str, retries: int = 3) -> str | None:
             except Exception:
                 if attempt < retries - 1:
                     time.sleep(1.5 * (attempt + 1))
-        print(f"    [WARN] 翻译接口 {api['url'][:40]} 失败，尝试下一个")
+        print(f"    [WARN] Google 翻译接口 {api['url'][:40]} 失败")
     print(f"    [ERR] 所有翻译接口均失败")
     return None
 
@@ -324,16 +361,9 @@ def fetch_all_links() -> list[dict]:
     ))
     all_links.extend(crawl_list_page(
         "NVIDIA Developer Blog",
-        "https://developer.nvidia.com/blog/category/ai/",
-        "article h2 a, .post-title a, h3.entry-title a",
+        "https://developer.nvidia.com/blog/",
+        "article h2 a, .post-title a, h3.entry-title a, a.post-card__link",
         "https://developer.nvidia.com",
-    ))
-    all_links.extend(crawl_list_page(
-        "NVIDIA Developer Tools",
-        "https://developer.nvidia.com/blog/category/developer-tools/",
-        "article h2 a, .post-title a, h3.entry-title a",
-        "https://developer.nvidia.com",
-        max_items=5,
     ))
     all_links.extend(crawl_list_page(
         "Hugging Face Blog", "https://huggingface.co/blog",
@@ -341,11 +371,15 @@ def fetch_all_links() -> list[dict]:
         "https://huggingface.co",
         exclude_hrefs={"/blog", "/blog/"},
     ))
-    all_links.extend(crawl_list_page(
-        "OpenAI Blog", "https://openai.com/blog",
-        "a[href*='/index/'], a[href*='/blog/']", "https://openai.com",
-        exclude_hrefs={"/blog", "/blog/"},
-    ))
+    # OpenAI 有反爬保护(403)，暂时跳过，保留入口以便后续恢复
+    try:
+        all_links.extend(crawl_list_page(
+            "OpenAI Blog", "https://openai.com/news/",
+            "a[href*='/index/']", "https://openai.com",
+            exclude_hrefs={"/news", "/news/"},
+        ))
+    except Exception as e:
+        print(f"  [SKIP] OpenAI Blog: {e}")
     all_links.extend(crawl_list_page(
         "Anthropic News", "https://www.anthropic.com/news",
         "a[href*='/news/']", "https://www.anthropic.com",
@@ -504,6 +538,7 @@ def main():
     print("  每日AI前沿 - 爬虫（SQLite 版）")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  数据库: {DB_PATH}")
+    print(f"  翻译引擎: {'DeepL API' if DEEPL_API_KEY else 'Google Translate (备选)'}")
     print("=" * 60)
     print()
 
@@ -548,4 +583,11 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--refresh" in sys.argv:
+        print("[!] --refresh 模式：清空数据库后重新爬取")
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("DELETE FROM news")
+        conn.commit()
+        conn.close()
+        print("  数据库已清空\n")
     main()
