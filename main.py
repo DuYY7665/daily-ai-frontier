@@ -254,8 +254,30 @@ def is_noise(text: str) -> bool:
 
 ALIYUN_AK_ID = os.environ.get("ALIYUN_AK_ID", "")
 ALIYUN_AK_SECRET = os.environ.get("ALIYUN_AK_SECRET", "")
+ALI_MONTHLY_LIMIT = 900_000  # 免费额度100万，留10%安全余量
 
 _ali_client = None
+_ali_char_count = 0  # 本次运行的阿里翻译字符数累计
+_ali_char_file = os.path.join(BASE_DIR, ".ali_usage.txt")
+
+
+def _load_ali_usage() -> int:
+    """读取本月阿里翻译已用字符数"""
+    try:
+        with open(_ali_char_file, "r") as f:
+            month, count = f.read().strip().split(",")
+            if month == datetime.now().strftime("%Y-%m"):
+                return int(count)
+    except Exception:
+        pass
+    return 0
+
+
+def _save_ali_usage(count: int):
+    """保存本月阿里翻译已用字符数"""
+    month = datetime.now().strftime("%Y-%m")
+    with open(_ali_char_file, "w") as f:
+        f.write(f"{month},{count}")
 
 
 def _get_ali_client():
@@ -284,27 +306,33 @@ def _has_chinese(text: str) -> bool:
 
 
 def translate_to_chinese(text: str) -> str | None:
-    """翻译英文为中文：优先阿里翻译，失败时回退到 Google。
+    """翻译英文为中文：阿里翻译（有额度时）→ Google（备选）。
     翻译失败（结果仍为英文）时返回 None，避免把英文原文当中文入库。"""
+    global _ali_char_count
     if not text or len(text.strip()) < 5:
         return None
 
+    ali_usage = _load_ali_usage() + _ali_char_count
+    use_ali = bool(ALIYUN_AK_ID and ali_usage < ALI_MONTHLY_LIMIT)
+    if ALIYUN_AK_ID and not use_ali:
+        print(f"      [QUOTA] 阿里翻译本月已用 {ali_usage} 字符，超出限额，切换 Google")
+
     chunks = _split_text(text, max_len=4500)
     translated_parts = []
-    any_failed = False
 
     for chunk in chunks:
         result = None
-        if ALIYUN_AK_ID:
+        if use_ali:
             result = _ali_translate_chunk(chunk)
+            if result:
+                _ali_char_count += len(chunk)
         if not result:
             result = _google_translate_chunk(chunk)
         if result and _has_chinese(result):
             translated_parts.append(result)
         else:
             print(f"      [WARN] 翻译chunk失败，跳过该段")
-            any_failed = True
-            translated_parts.append(result if result else "")
+            translated_parts.append("")
         if len(chunks) > 1:
             time.sleep(0.3)
 
@@ -352,8 +380,10 @@ def _ali_translate_chunk(text: str, retries: int = 2) -> str | None:
     for attempt in range(retries):
         try:
             resp = client.translate_general(req)
-            if resp.body and resp.body.code == 200:
+            if resp.body and str(resp.body.code) == "200":
                 return resp.body.data.translated
+            else:
+                print(f"      [WARN] 阿里翻译返回: code={resp.body.code}")
         except Exception as e:
             if attempt < retries - 1:
                 time.sleep(1)
@@ -663,7 +693,15 @@ def main():
     print("  每日AI前沿 - 爬虫（SQLite 版）")
     print(f"  运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  数据库: {DB_PATH}")
-    print(f"  翻译引擎: {'阿里翻译 API' if ALIYUN_AK_ID else 'Google Translate (备选)'}")
+    ali_usage = _load_ali_usage()
+    if ALIYUN_AK_ID:
+        remaining = ALI_MONTHLY_LIMIT - ali_usage
+        engine = f"阿里翻译 API (本月已用 {ali_usage} 字符, 剩余 {remaining})"
+        if remaining <= 0:
+            engine += " → 已超限，将使用 Google Translate"
+    else:
+        engine = "Google Translate (备选)"
+    print(f"  翻译引擎: {engine}")
     print("=" * 60)
     print()
 
@@ -707,6 +745,12 @@ def main():
     print("[4/4] 正在写入数据库...")
     inserted, skipped = insert_to_db(processed)
     print(f"  新增 {inserted} 条，跳过 {skipped} 条\n")
+
+    # 保存阿里翻译用量
+    if _ali_char_count > 0:
+        total_usage = _load_ali_usage() + _ali_char_count
+        _save_ali_usage(total_usage)
+        print(f"  阿里翻译本次用量: {_ali_char_count} 字符, 本月累计: {total_usage} 字符")
 
     print("=" * 60)
     print(f"  任务完成！新增 {inserted} 条")
