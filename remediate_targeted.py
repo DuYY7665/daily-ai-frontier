@@ -94,9 +94,9 @@ def needs_remediation(row: sqlite3.Row) -> tuple[bool, list[str]]:
     if _GLUED_RE.search(cn) or _GLUED_RE.search(summary):
         reasons.append("glued_metadata")
 
-    # 拉丁字母占比过高（夹杂大块英文）
+    # 拉丁字母占比过高（夹杂大块英文）——专有名词多时易误判，仅在中文字偏少时触发
     lat, zh = _letter_counts(cn)
-    if zh >= 5 and lat > 0 and lat / (lat + zh) > 0.42:
+    if 5 <= zh < 28 and lat > 0 and lat / (lat + zh) > 0.42:
         reasons.append("high_latin_ratio")
 
     # 摘要与正文前几字完全相同且疑似英文标题重复一遍
@@ -306,7 +306,7 @@ def main() -> int:
     print(f"  本月累计(写入后): {usage_base + ali_used_run}")
     if skipped_quota:
         print(f"  注意: 治理过程中曾触及额度上限，后续条目可能只用了 Google")
-    return 0 if failed == 0 else 0
+    return 0
 
 
 if __name__ == "__main__":
