@@ -278,13 +278,20 @@ def _get_ali_client():
     return _ali_client
 
 
-def translate_to_chinese(text: str) -> str:
-    """翻译英文为中文：优先阿里翻译，失败时回退到 Google"""
+def _has_chinese(text: str) -> bool:
+    """检测文本是否包含中文字符"""
+    return any('\u4e00' <= c <= '\u9fff' for c in text)
+
+
+def translate_to_chinese(text: str) -> str | None:
+    """翻译英文为中文：优先阿里翻译，失败时回退到 Google。
+    翻译失败（结果仍为英文）时返回 None，避免把英文原文当中文入库。"""
     if not text or len(text.strip()) < 5:
-        return text
+        return None
 
     chunks = _split_text(text, max_len=4500)
     translated_parts = []
+    any_failed = False
 
     for chunk in chunks:
         result = None
@@ -292,11 +299,20 @@ def translate_to_chinese(text: str) -> str:
             result = _ali_translate_chunk(chunk)
         if not result:
             result = _google_translate_chunk(chunk)
-        translated_parts.append(result if result else chunk)
+        if result and _has_chinese(result):
+            translated_parts.append(result)
+        else:
+            print(f"      [WARN] 翻译chunk失败，跳过该段")
+            any_failed = True
+            translated_parts.append(result if result else "")
         if len(chunks) > 1:
             time.sleep(0.3)
 
-    return "".join(translated_parts)
+    merged = "".join(translated_parts)
+    if not _has_chinese(merged):
+        print(f"      [ERR] 翻译结果不含中文，判定为翻译失败")
+        return None
+    return merged
 
 
 def _split_text(text: str, max_len: int = 4500) -> list[str]:
