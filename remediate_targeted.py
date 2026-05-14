@@ -94,9 +94,9 @@ def needs_remediation(row: sqlite3.Row) -> tuple[bool, list[str]]:
     if _GLUED_RE.search(cn) or _GLUED_RE.search(summary):
         reasons.append("glued_metadata")
 
-    # 拉丁字母占比过高（夹杂大块英文）——专有名词多时易误判，仅在中文字偏少时触发
+    # 拉丁字母占比过高：仅在中文骨架明显不足时触发（避免 GPT/OpenAI 等专名误判）
     lat, zh = _letter_counts(cn)
-    if 5 <= zh < 28 and lat > 0 and lat / (lat + zh) > 0.42:
+    if zh < 12 and lat > 35 and lat > zh * 2:
         reasons.append("high_latin_ratio")
 
     # 摘要与正文前几字完全相同且疑似英文标题重复一遍
