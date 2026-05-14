@@ -117,11 +117,94 @@ def fetch_page(url: str, timeout: int = 15) -> BeautifulSoup | None:
         return None
 
 
-def extract_article_text(url: str, max_chars: int = 3000) -> str:
-    """进入文章详情页，提取正文文本"""
+def extract_article_date(soup: BeautifulSoup) -> str | None:
+    """从文章页 HTML 中提取真实发布日期，返回 ISO 格式字符串或 None"""
+    import json as _json
+
+    # Strategy 1: JSON-LD structured data (most reliable)
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            ld = _json.loads(script.string or "")
+            items = ld if isinstance(ld, list) else [ld]
+            for item in items:
+                for key in ("datePublished", "dateCreated", "dateModified"):
+                    if key in item:
+                        return _normalize_date(item[key])
+        except Exception:
+            pass
+
+    # Strategy 2: <meta> tags
+    meta_names = [
+        "article:published_time", "og:article:published_time",
+        "datePublished", "date", "publish_date", "pubdate",
+        "DC.date.issued", "sailthru.date",
+    ]
+    for name in meta_names:
+        tag = soup.find("meta", attrs={"property": name}) or soup.find("meta", attrs={"name": name})
+        if tag and tag.get("content"):
+            result = _normalize_date(tag["content"])
+            if result:
+                return result
+
+    # Strategy 3: <time> element with datetime attribute
+    for time_el in soup.find_all("time", attrs={"datetime": True}):
+        result = _normalize_date(time_el["datetime"])
+        if result:
+            return result
+
+    # Strategy 4: <time> element text content
+    for time_el in soup.find_all("time"):
+        result = _normalize_date(time_el.get_text(strip=True))
+        if result:
+            return result
+
+    return None
+
+
+def _normalize_date(raw: str) -> str | None:
+    """把各种日期格式统一为 YYYY-MM-DDTHH:MM:00+08:00"""
+    if not raw or len(raw) < 6:
+        return None
+    raw = raw.strip()
+
+    # Already ISO format: 2025-05-12T10:00:00Z or 2025-05-12T10:00:00+00:00
+    iso_match = re.match(r'(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})', raw)
+    if iso_match:
+        return f"{iso_match.group(1)}T{iso_match.group(2)}:00+08:00"
+
+    # Just date: 2025-05-12
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', raw):
+        return f"{raw}T00:00:00+08:00"
+
+    # "May 12, 2025" or "May 5, 2025"
+    months = {
+        "jan": "01", "feb": "02", "mar": "03", "apr": "04",
+        "may": "05", "jun": "06", "jul": "07", "aug": "08",
+        "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+    }
+    m = re.match(r'([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})', raw)
+    if m:
+        mon = months.get(m.group(1)[:3].lower())
+        if mon:
+            return f"{m.group(3)}-{mon}-{int(m.group(2)):02d}T00:00:00+08:00"
+
+    # "12 May 2025"
+    m2 = re.match(r'(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})', raw)
+    if m2:
+        mon = months.get(m2.group(2)[:3].lower())
+        if mon:
+            return f"{m2.group(3)}-{mon}-{int(m2.group(1)):02d}T00:00:00+08:00"
+
+    return None
+
+
+def extract_article_text(url: str, max_chars: int = 3000) -> tuple[str, str | None]:
+    """进入文章详情页，提取正文文本和发布日期。返回 (text, date_iso_or_None)"""
     soup = fetch_page(url)
     if not soup:
-        return ""
+        return "", None
+
+    pub_date = extract_article_date(soup)
 
     for tag in soup.select(
         "nav, header, footer, script, style, aside, "
@@ -154,7 +237,7 @@ def extract_article_text(url: str, max_chars: int = 3000) -> str:
         if total >= max_chars:
             break
 
-    return "\n".join(text_parts)
+    return "\n".join(text_parts), pub_date
 
 
 def is_noise(text: str) -> bool:
@@ -450,7 +533,13 @@ def process_article(link: dict) -> dict | None:
     try:
         print(f"    [DETAIL] {platform}: {title[:50]}...")
 
-        body = extract_article_text(url)
+        body, pub_date = extract_article_text(url)
+        article_date = pub_date if pub_date else get_now_iso()
+        if pub_date:
+            print(f"      [DATE] 提取到发布日期: {pub_date[:10]}")
+        else:
+            print(f"      [DATE] 未能提取发布日期，使用当前时间")
+
         if len(body) < 30:
             print(f"      [WARN] 正文太短({len(body)}字符)")
             body = title
@@ -476,7 +565,7 @@ def process_article(link: dict) -> dict | None:
         print(f"      [OK] 分类={category}, 摘要={len(cn_summary)}字, 详情={len(cn_detail)}字")
 
         return {
-            "date": get_now_iso(),
+            "date": article_date,
             "platform": platform,
             "category": category,
             "priority": PRIORITY_MAP.get(category, 2),
@@ -567,10 +656,20 @@ def main():
     all_links = fetch_all_links()
     print(f"  共获取 {len(all_links)} 条文章链接\n")
 
-    # 2. 去重：跳过已在数据库中的 URL
+    # 2. 去重：跳过已在数据库中的 URL + 跨来源去重
     print("[2/4] 正在去重...")
     existing_urls = get_existing_urls()
-    new_links = [l for l in all_links if l["url"] not in existing_urls]
+    new_links = []
+    batch_seen = set()
+    for l in all_links:
+        norm_url = l["url"].rstrip("/")
+        if norm_url in existing_urls or norm_url in batch_seen:
+            continue
+        # 也检查带尾斜杠的版本
+        if l["url"] in existing_urls:
+            continue
+        batch_seen.add(norm_url)
+        new_links.append(l)
     print(f"  {len(new_links)} 条新链接（跳过 {len(all_links) - len(new_links)} 条已存在）\n")
 
     if not new_links:
